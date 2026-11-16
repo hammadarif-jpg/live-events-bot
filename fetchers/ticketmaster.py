@@ -1,13 +1,11 @@
 import os
 import requests
 from datetime import datetime, timezone
-from dotenv import load_dotenv
-
-load_dotenv(override=True)
 
 TICKETMASTER_API_KEY = os.getenv("TICKETMASTER_API_KEY")
+BASE_URL = "https://app.ticketmaster.com/discovery/v2/events.json"
 
-def parse_iso_utc(dt_str):
+def parse_iso(dt_str):
     if not dt_str:
         return None
     try:
@@ -15,116 +13,118 @@ def parse_iso_utc(dt_str):
     except Exception:
         return None
 
-def fetch_ticketmaster_events(keyword="", size=100):
-    """Scans US events on Ticketmaster/Live Nation and extracts ONLY sales/presales whose START time is in the FUTURE."""
+def fetch_ticketmaster_events(size=200):
     if not TICKETMASTER_API_KEY:
-        print("⚠️ Warning: TICKETMASTER_API_KEY missing in .env")
+        print("⚠️ Missing TICKETMASTER_API_KEY")
         return []
 
-    url = "https://app.ticketmaster.com/discovery/v2/events.json"
     now_utc = datetime.now(timezone.utc)
-    now_iso = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+    collected = []
+    seen_ids = set()
 
-    normalized_events = []
+    # Scan major tour markets (US, UK, Canada, Germany, France, Netherlands, Australia)
+    # and sort by date/relevance to catch newly announced tours & presales
+    queries = [
+        {"countryCode": "US", "classificationName": "Music", "sort": "onSaleStartDate,asc", "size": 200},
+        {"countryCode": "GB", "classificationName": "Music", "sort": "onSaleStartDate,asc", "size": 150},
+        {"countryCode": "CA", "classificationName": "Music", "sort": "onSaleStartDate,asc", "size": 100},
+        {"countryCode": "DE,FR,NL,ES,IT,AU", "classificationName": "Music", "sort": "onSaleStartDate,asc", "size": 150},
+        # Also catch brand-new announced tours where public onsale might still be TBD but presale is live
+        {"countryCode": "US,GB,CA", "classificationName": "Music", "sort": "date,asc", "size": 200},
+    ]
 
-    for page in range(5):
+    for q in queries:
         params = {
             "apikey": TICKETMASTER_API_KEY,
-            "countryCode": "US",
-            "startDateTime": now_iso,
-            "sort": "relevance,desc",
-            "size": size,
-            "page": page
+            "onsaleStartDateTime": now_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            **q
         }
-        if keyword:
-            params["keyword"] = keyword
+        # For the date-sorted query, don't restrict onsaleStartDateTime so TBD public sales with active presales are caught!
+        if q.get("sort") == "date,asc":
+            params.pop("onsaleStartDateTime", None)
+            params["startDateTime"] = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
 
         try:
-            response = requests.get(url, params=params, timeout=15)
-            response.raise_for_status()
-            data = response.json()
+            resp = requests.get(BASE_URL, params=params, timeout=15)
+            if resp.status_code != 200:
+                print(f"⚠️ Ticketmaster API warning ({resp.status_code}): {resp.text[:120]}")
+                continue
+
+            events = resp.json().get("_embedded", {}).get("events", [])
+            for ev in events:
+                ev_id = ev.get("id")
+                if not ev_id or ev_id in seen_ids:
+                    continue
+
+                sales = ev.get("sales", {})
+                public_sale = sales.get("public", {})
+                public_start = parse_iso(public_sale.get("startDateTime"))
+                is_tbd = public_sale.get("startTBD", False)
+
+                # Check ALL upcoming presales on this event
+                presales = sales.get("presales", [])
+                upcoming_presales = []
+                for p in presales:
+                    p_start = parse_iso(p.get("startDateTime"))
+                    p_end = parse_iso(p.get("endDateTime"))
+                    # Keep if presale starts in future OR is currently open right now!
+                    if (p_start and p_start > now_utc) or (p_start and p_end and p_start <= now_utc <= p_end):
+                        upcoming_presales.append({
+                            "name": p.get("name", "Presale"),
+                            "start": p_start,
+                            "end": p_end,
+                            "url": p.get("url") or ev.get("url")
+                        })
+
+                # Strict Future Filter: Must have an upcoming/active presale OR a future public sale
+                has_future_public = bool(public_start and public_start > now_utc)
+                if not upcoming_presales and not has_future_public:
+                    continue
+
+                seen_ids.add(ev_id)
+
+                # Extract artist & venue info
+                attractions = ev.get("_embedded", {}).get("attractions", [])
+                artist_name = attractions[0].get("name") if attractions else ev.get("name", "Unknown Artist")
+
+                venues = ev.get("_embedded", {}).get("venues", [])
+                venue = venues[0] if venues else {}
+                city = venue.get("city", {}).get("name", "")
+                country = venue.get("country", {}).get("countryCode", "")
+                venue_name = venue.get("name", "")
+                location_str = f"{city}, {country}".strip(", ")
+
+                # Pick earliest upcoming presale if available
+                upcoming_presales.sort(key=lambda x: x["start"] or now_utc)
+                best_presale = upcoming_presales[0] if upcoming_presales else None
+
+                if best_presale:
+                    sale_info = f"Presale ({best_presale['name']}): {best_presale['start'].strftime('%Y-%m-%d %H:%M UTC')}"
+                    reg_link = best_presale["url"] or ev.get("url", "")
+                elif has_future_public:
+                    sale_info = f"Public Sale: {public_start.strftime('%Y-%m-%d %H:%M UTC')}"
+                    reg_link = ev.get("url", "")
+                else:
+                    sale_info = "Upcoming Presale / TBD"
+                    reg_link = ev.get("url", "")
+
+                collected.append({
+                    "id": ev_id,
+                    "artist": artist_name,
+                    "event_name": ev.get("name", artist_name),
+                    "venue": venue_name,
+                    "city": location_str,
+                    "date": sale_info,
+                    "has_presale": bool(best_presale),
+                    "presale_name": best_presale["name"] if best_presale else None,
+                    "presale_start": best_presale["start"].isoformat() if best_presale and best_presale["start"] else None,
+                    "public_start": public_start.isoformat() if public_start else None,
+                    "reg_link": reg_link,
+                    "source": "Ticketmaster"
+                })
+
         except Exception as e:
-            print(f"❌ Ticketmaster API Error (Page {page}): {e}")
-            break
+            print(f"⚠️ Error fetching Ticketmaster batch: {e}")
 
-        raw_events = data.get("_embedded", {}).get("events", [])
-        if not raw_events:
-            break
-
-        for item in raw_events:
-            name = item.get("name", "Unknown Event")
-            event_url = item.get("url", "")
-            if not event_url:
-                continue
-
-            sales = item.get("sales", {})
-            public_info = sales.get("public", {})
-            pub_start_raw = public_info.get("startDateTime", "")
-            pub_dt = parse_iso_utc(pub_start_raw)
-            pub_start_clean = pub_start_raw[:16].replace("T", " ") + " UTC" if pub_start_raw else "TBD"
-
-            presales = sales.get("presales", [])
-            upcoming_presales = []
-            signup_link = event_url
-            has_future_presale = False
-
-            for p in presales:
-                p_name = p.get("name", "Presale")
-                p_start = p.get("startDateTime", "")
-                p_url = p.get("url", "")
-                p_start_dt = parse_iso_utc(p_start)
-
-                # STRICT CHECK: Only include presales whose START time is strictly in the FUTURE
-                if p_start_dt and p_start_dt > now_utc:
-                    has_future_presale = True
-                    if p_url and p_url.startswith("http"):
-                        signup_link = p_url
-                    p_clean = p_start[:16].replace("T", " ") + " UTC"
-                    upcoming_presales.append(f"• **{p_name}:** Starts {p_clean}")
-
-            # STRICT CHECK: Public sale START time must also be strictly in the FUTURE
-            has_future_public = bool(pub_dt and pub_dt > now_utc)
-
-            # Block any event whose presales AND public sale have ALREADY started or sold out
-            if not has_future_presale and not has_future_public:
-                continue
-
-            dates = item.get("dates", {})
-            start_info = dates.get("start", {})
-            event_date = start_info.get("localDate", "TBD")
-            event_time = start_info.get("localTime", "TBD")
-            timezone_str = dates.get("timezone", "US Local")
-
-            venues = item.get("_embedded", {}).get("venues", [{}])
-            venue = venues[0] if venues else {}
-            venue_name = venue.get("name", "TBD Venue")
-            city = venue.get("city", {}).get("name", "Unknown City")
-            state = venue.get("state", {}).get("stateCode", "")
-            location = f"{city}, {state}".strip(", ")
-
-            attractions = item.get("_embedded", {}).get("attractions", [])
-            artist = attractions[0].get("name", name) if attractions else name
-
-            presale_summary = "\n".join(upcoming_presales[:4]) if upcoming_presales else "No Presale (Direct Public Sale Upcoming)"
-            promoter = item.get("promoter", {}).get("name", "")
-            platform_label = "Live Nation / Ticketmaster" if "LIVE NATION" in promoter.upper() else "Ticketmaster"
-
-            normalized_events.append({
-                "name": name,
-                "artist": artist,
-                "date": f"Public Sale Starts: {pub_start_clean} | Show Date: {event_date}",
-                "time": f"{event_time} ({timezone_str})",
-                "venue": venue_name,
-                "city": location,
-                "platform": platform_label,
-                "status": "UPCOMING PRESALE / SIGNUP" if has_future_presale else "UPCOMING PUBLIC SALE",
-                "presale": presale_summary,
-                "public_sale": pub_start_clean,
-                "has_presale": has_future_presale,
-                "reg_link": signup_link,
-                "ticket_link": event_url,
-                "source": "Ticketmaster / Live Nation Official",
-                "popularity_score": 90 if has_future_presale else 70
-            })
-
-    return normalized_events
+    print(f"✅ Fetched {len(collected)} verified upcoming presale/sale events across US/UK/EU/CA/AU.")
+    return collected
