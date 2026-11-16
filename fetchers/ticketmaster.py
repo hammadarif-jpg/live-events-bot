@@ -22,27 +22,21 @@ def fetch_ticketmaster_events(size=200):
     collected = []
     seen_ids = set()
 
-    # Scan major tour markets (US, UK, Canada, Germany, France, Netherlands, Australia)
-    # and sort by date/relevance to catch newly announced tours & presales
     queries = [
-        {"countryCode": "US", "classificationName": "Music", "sort": "onSaleStartDate,asc", "size": 200},
-        {"countryCode": "GB", "classificationName": "Music", "sort": "onSaleStartDate,asc", "size": 150},
-        {"countryCode": "CA", "classificationName": "Music", "sort": "onSaleStartDate,asc", "size": 100},
-        {"countryCode": "DE,FR,NL,ES,IT,AU", "classificationName": "Music", "sort": "onSaleStartDate,asc", "size": 150},
-        # Also catch brand-new announced tours where public onsale might still be TBD but presale is live
-        {"countryCode": "US,GB,CA", "classificationName": "Music", "sort": "date,asc", "size": 200},
+        {"countryCode": "US", "classificationName": "Music", "sort": "date,asc", "size": 200},
+        {"countryCode": "GB", "classificationName": "Music", "sort": "date,asc", "size": 150},
+        {"countryCode": "CA", "classificationName": "Music", "sort": "date,asc", "size": 100},
+        {"countryCode": "DE", "classificationName": "Music", "sort": "date,asc", "size": 100},
+        {"countryCode": "FR", "classificationName": "Music", "sort": "date,asc", "size": 100},
+        {"countryCode": "AU", "classificationName": "Music", "sort": "date,asc", "size": 100},
     ]
 
     for q in queries:
         params = {
             "apikey": TICKETMASTER_API_KEY,
-            "onsaleStartDateTime": now_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "startDateTime": now_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
             **q
         }
-        # For the date-sorted query, don't restrict onsaleStartDateTime so TBD public sales with active presales are caught!
-        if q.get("sort") == "date,asc":
-            params.pop("onsaleStartDateTime", None)
-            params["startDateTime"] = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
 
         try:
             resp = requests.get(BASE_URL, params=params, timeout=15)
@@ -59,15 +53,12 @@ def fetch_ticketmaster_events(size=200):
                 sales = ev.get("sales", {})
                 public_sale = sales.get("public", {})
                 public_start = parse_iso(public_sale.get("startDateTime"))
-                is_tbd = public_sale.get("startTBD", False)
 
-                # Check ALL upcoming presales on this event
                 presales = sales.get("presales", [])
                 upcoming_presales = []
                 for p in presales:
                     p_start = parse_iso(p.get("startDateTime"))
                     p_end = parse_iso(p.get("endDateTime"))
-                    # Keep if presale starts in future OR is currently open right now!
                     if (p_start and p_start > now_utc) or (p_start and p_end and p_start <= now_utc <= p_end):
                         upcoming_presales.append({
                             "name": p.get("name", "Presale"),
@@ -76,14 +67,12 @@ def fetch_ticketmaster_events(size=200):
                             "url": p.get("url") or ev.get("url")
                         })
 
-                # Strict Future Filter: Must have an upcoming/active presale OR a future public sale
                 has_future_public = bool(public_start and public_start > now_utc)
                 if not upcoming_presales and not has_future_public:
                     continue
 
                 seen_ids.add(ev_id)
 
-                # Extract artist & venue info
                 attractions = ev.get("_embedded", {}).get("attractions", [])
                 artist_name = attractions[0].get("name") if attractions else ev.get("name", "Unknown Artist")
 
@@ -94,7 +83,6 @@ def fetch_ticketmaster_events(size=200):
                 venue_name = venue.get("name", "")
                 location_str = f"{city}, {country}".strip(", ")
 
-                # Pick earliest upcoming presale if available
                 upcoming_presales.sort(key=lambda x: x["start"] or now_utc)
                 best_presale = upcoming_presales[0] if upcoming_presales else None
 
@@ -126,5 +114,5 @@ def fetch_ticketmaster_events(size=200):
         except Exception as e:
             print(f"⚠️ Error fetching Ticketmaster batch: {e}")
 
-    print(f"✅ Fetched {len(collected)} verified upcoming presale/sale events across US/UK/EU/CA/AU.")
+    print(f"✅ Fetched {len(collected)} verified upcoming presale/sale events across US/GB/CA/DE/FR/AU.")
     return collected
