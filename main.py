@@ -20,11 +20,10 @@ PREFERRED_ARTISTS = [
 ]
 
 def send_hourly_high_sale_radar(ranked_events):
-    """Sends an hourly update of Top High-Demand Upcoming Sales & Presales to Discord."""
+    """Sends an hourly update of Top High-Demand Upcoming Sales & Presales to Discord in English."""
     if not DISCORD_WEBHOOK_URL:
         return
 
-    # Filter top high-priority events (presales or preferred/high-score sales)
     high_sales = [ev for ev in ranked_events if ev.get("has_presale") or ev.get("rank_score", 0) >= 80]
     if not high_sales:
         high_sales = ranked_events[:5]
@@ -38,14 +37,14 @@ def send_hourly_high_sale_radar(ranked_events):
             f"   🔗 [Signup / Ticket Link]({ev['reg_link']})"
         )
 
-    summary_text = "\n\n".join(lines) if lines else "Is ghante koi high-demand upcoming sale queue mein nahi hai."
+    summary_text = "\n\n".join(lines) if lines else "No high-demand upcoming sales currently in the queue."
 
     payload = {
         "embeds": [
             {
                 "title": "⚡ HOURLY HIGH-DEMAND SALE & PRESALE RADAR",
                 "description": (
-                    f"Har ghante ka live update — aane wali badi sales aur active presale signups:\n\n"
+                    f"Live hourly update — top upcoming high-demand sales and active presale signups:\n\n"
                     f"{summary_text}"
                 ),
                 "color": 15105570,
@@ -66,20 +65,16 @@ def run_discovery_pipeline():
     print(f"🚀 Starting Hourly Presale & High-Sale Radar at {now_utc.strftime('%Y-%m-%d %H:%M:%S UTC')}...")
     all_raw_events = []
 
-    # 1. Fetch ONLY Upcoming Presales & Future Public Sales
     print("🔍 Scanning Ticketmaster & Live Nation for Upcoming Presales & Sales...")
     all_raw_events.extend(fetch_ticketmaster_events(size=100))
 
-    # 2. Fetch Official X (Twitter) Alerts if token is set
     all_raw_events.extend(fetch_x_twitter_announcements())
 
     print(f"📦 Total upcoming sale/presale events found: {len(all_raw_events)}")
 
-    # 3. Verify, Deduplicate & Rank (High-demand artists & presales ranked first)
     ranked_events = verify_and_rank_events(all_raw_events, preferred_artists=PREFERRED_ARTISTS)
     print(f"🛡️ Verified & ranked upcoming sales: {len(ranked_events)}")
 
-    # 4. Save brand-new signups/tours to Supabase and alert immediately
     brand_new_events = filter_new_and_save_to_db(ranked_events)
     print(f"🆕 Brand-new presale/sale alerts to send: {len(brand_new_events)}")
 
@@ -89,7 +84,6 @@ def run_discovery_pipeline():
             report_title="🆕 NEW PRESALE SIGNUP / TOUR ANNOUNCEMENT DETECTED!"
         )
 
-    # 5. Send Hourly High-Demand Upcoming Sales Update every hour
     send_hourly_high_sale_radar(ranked_events)
 
 if __name__ == "__main__":
