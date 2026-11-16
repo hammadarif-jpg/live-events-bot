@@ -1,5 +1,6 @@
 import os
-from datetime import datetime
+import requests
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 
 from fetchers.ticketmaster import fetch_ticketmaster_events
@@ -9,17 +10,63 @@ from discord_notifier import send_discord_event_report
 
 load_dotenv(override=True)
 
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
+
 PREFERRED_ARTISTS = [
     "Taylor Swift", "Drake", "Coldplay", "Oasis", "Stray Kids",
     "Bruno Mars", "The Weeknd", "Sabrina Carpenter", "Bad Bunny", "Morgan Wallen",
-    "Olivia Rodrigo", "Billie Eilish", "Kendrick Lamar", "Lady Gaga", "Post Malone"
+    "Olivia Rodrigo", "Billie Eilish", "Kendrick Lamar", "Lady Gaga", "Post Malone",
+    "Ed Sheeran", "Beyonce", "Ariana Grande", "Travis Scott", "Dua Lipa"
 ]
 
+def send_hourly_high_sale_radar(ranked_events):
+    """Sends an hourly update of Top High-Demand Upcoming Sales & Presales to Discord."""
+    if not DISCORD_WEBHOOK_URL:
+        return
+
+    # Filter top high-priority events (presales or preferred/high-score sales)
+    high_sales = [ev for ev in ranked_events if ev.get("has_presale") or ev.get("rank_score", 0) >= 80]
+    if not high_sales:
+        high_sales = ranked_events[:5]
+
+    lines = []
+    for i, ev in enumerate(high_sales[:8], 1):
+        status_tag = "🎟️ PRESALE" if ev.get("has_presale") else "🔥 PUBLIC SALE"
+        lines.append(
+            f"**{i}. {ev['artist']}** — {ev['city']} ({status_tag})\n"
+            f"   ⏰ {ev['date']}\n"
+            f"   🔗 [Signup / Ticket Link]({ev['reg_link']})"
+        )
+
+    summary_text = "\n\n".join(lines) if lines else "Is ghante koi high-demand upcoming sale queue mein nahi hai."
+
+    payload = {
+        "embeds": [
+            {
+                "title": "⚡ HOURLY HIGH-DEMAND SALE & PRESALE RADAR",
+                "description": (
+                    f"Har ghante ka live update — aane wali badi sales aur active presale signups:\n\n"
+                    f"{summary_text}"
+                ),
+                "color": 15105570,
+                "footer": {
+                    "text": f"Hourly Radar • {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"
+                }
+            }
+        ]
+    }
+    try:
+        requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=10)
+        print("⚡ Hourly High-Sale Radar sent to Discord!")
+    except Exception as e:
+        print(f"⚠️ Failed to send hourly radar: {e}")
+
 def run_discovery_pipeline():
-    print(f"🚀 Starting Presale & Upcoming Sale Radar at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}...")
+    now_utc = datetime.now(timezone.utc)
+    print(f"🚀 Starting Hourly Presale & High-Sale Radar at {now_utc.strftime('%Y-%m-%d %H:%M:%S UTC')}...")
     all_raw_events = []
 
-    # 1. Fetch ONLY Upcoming Presales & Future Public Sales with Direct Signup Links
+    # 1. Fetch ONLY Upcoming Presales & Future Public Sales
     print("🔍 Scanning Ticketmaster & Live Nation for Upcoming Presales & Sales...")
     all_raw_events.extend(fetch_ticketmaster_events(size=100))
 
@@ -28,20 +75,22 @@ def run_discovery_pipeline():
 
     print(f"📦 Total upcoming sale/presale events found: {len(all_raw_events)}")
 
-    # 3. Verify, Deduplicate & Rank
+    # 3. Verify, Deduplicate & Rank (High-demand artists & presales ranked first)
     ranked_events = verify_and_rank_events(all_raw_events, preferred_artists=PREFERRED_ARTISTS)
     print(f"🛡️ Verified & ranked upcoming sales: {len(ranked_events)}")
 
-    # 4. Save new discoveries to Supabase
+    # 4. Save brand-new signups/tours to Supabase and alert immediately
     brand_new_events = filter_new_and_save_to_db(ranked_events)
     print(f"🆕 Brand-new presale/sale alerts to send: {len(brand_new_events)}")
 
-    # 5. Send Top 15 Presale & Upcoming Sale Alerts to Discord
-    top_to_send = brand_new_events[:15]
-    if top_to_send:
-        send_discord_event_report(top_to_send, report_title="🎟️ NEW PRESALE SIGNUPS & UPCOMING TICKET SALES")
-    else:
-        print("✅ No duplicate alerts sent. Waiting for new tour/presale announcements!")
+    if brand_new_events:
+        send_discord_event_report(
+            brand_new_events[:15],
+            report_title="🆕 NEW PRESALE SIGNUP / TOUR ANNOUNCEMENT DETECTED!"
+        )
+
+    # 5. Send Hourly High-Demand Upcoming Sales Update every hour
+    send_hourly_high_sale_radar(ranked_events)
 
 if __name__ == "__main__":
     run_discovery_pipeline()
