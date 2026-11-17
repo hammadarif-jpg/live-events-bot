@@ -1,4 +1,5 @@
 import os
+import re
 import hashlib
 import requests
 import xml.etree.ElementTree as ET
@@ -28,6 +29,63 @@ def parse_iso(dt_str):
     except Exception:
         return None
 
+def get_direct_laylo_seated_signups():
+    """Fetches direct Laylo, Seated, and Artist Presale RSVP signup links."""
+    results = []
+    seen = set()
+
+    # Targeted RSS + web discovery specifically for Laylo, Seated & Artist Presale signups
+    queries = [
+        "https://news.google.com/rss/search?q=%22signup.seated.com%22+OR+%22seated.com%22+presale+when:7d&hl=en-US&gl=US&ceid=US:en",
+        "https://news.google.com/rss/search?q=%22laylo.com%22+presale+OR+tour+when:7d&hl=en-US&gl=US&ceid=US:en",
+        "https://news.google.com/rss/search?q=%22sign+up+for+presale%22+OR+%22register+for+presale%22+tour+when:3d&hl=en-US&gl=US&ceid=US:en",
+        "https://news.google.com/rss/search?q=%22artist+presale%22+%22sign+up%22+2026+OR+2027+when:3d&hl=en-US&gl=US&ceid=US:en",
+        "https://news.google.com/rss/search?q=%22presale+sign-up%22+OR+%22presale+signup%22+tickets+when:3d&hl=en-GB&gl=GB&ceid=GB:en",
+    ]
+
+    for url in queries:
+        try:
+            r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=12)
+            if r.status_code != 200:
+                continue
+            root = ET.fromstring(r.content)
+            for item in root.findall(".//item")[:15]:
+                title = (item.findtext("title") or "").strip()
+                link = (item.findtext("link") or "").strip()
+                pub = (item.findtext("pubDate") or "")[:16]
+                if not title or not link:
+                    continue
+
+                clean_title = title.split(" - ")[0].strip()
+                uid = hashlib.sha256(clean_title.lower().encode()).hexdigest()[:16]
+                if uid in seen:
+                    continue
+                seen.add(uid)
+
+                low = title.lower()
+                if "seated" in low:
+                    tag = "SEATED SIGNUP"
+                elif "laylo" in low:
+                    tag = "LAYLO RSVP"
+                else:
+                    tag = "PRESALE SIGNUP"
+
+                results.append({
+                    "id": f"rsvp_{uid}",
+                    "artist": clean_title[:90],
+                    "city": tag,
+                    "when": f"🎟️ {tag} • {pub}",
+                    "link": link,
+                    "is_presale": True,
+                    "is_signup": True,
+                    "score": 110
+                })
+        except Exception as e:
+            print(f"⚠️ Signup RSS warning: {e}")
+
+    print(f"✅ Direct Laylo/Seated/Presale Signups found: {len(results)}")
+    return results
+
 def get_ticketmaster_sales():
     if not TICKETMASTER_API_KEY:
         print("❌ Missing TICKETMASTER_API_KEY")
@@ -38,8 +96,7 @@ def get_ticketmaster_sales():
     results = []
     seen = set()
 
-    markets = ["US", "GB", "CA", "AU", "DE"]
-    for country in markets:
+    for country in ["US", "GB", "CA", "AU", "DE"]:
         params = {
             "apikey": TICKETMASTER_API_KEY,
             "countryCode": country,
@@ -50,7 +107,6 @@ def get_ticketmaster_sales():
         try:
             r = requests.get("https://app.ticketmaster.com/discovery/v2/events.json", params=params, timeout=15)
             if r.status_code != 200:
-                print(f"⚠️ TM {country} status {r.status_code}: {r.text[:100]}")
                 continue
 
             events = r.json().get("_embedded", {}).get("events", [])
@@ -100,6 +156,7 @@ def get_ticketmaster_sales():
                     "when": when_str,
                     "link": link,
                     "is_presale": is_presale,
+                    "is_signup": False,
                     "score": score
                 })
         except Exception as e:
@@ -108,48 +165,7 @@ def get_ticketmaster_sales():
     print(f"✅ Ticketmaster collected: {len(results)}")
     return results
 
-def get_presale_signup_news():
-    feeds = [
-        "https://news.google.com/rss/search?q=%22presale%22+%22sign+up%22+tour+when:2d&hl=en-US&gl=US&ceid=US:en",
-        "https://news.google.com/rss/search?q=%22artist+presale%22+OR+%22laylo%22+OR+%22seated%22+tour+when:3d&hl=en-US&gl=US&ceid=US:en",
-        "https://news.google.com/rss/search?q=%22presale+registration%22+OR+%22tickets+on+sale%22+tour+when:2d&hl=en-GB&gl=GB&ceid=GB:en",
-    ]
-    results = []
-    seen = set()
-    for url in feeds:
-        try:
-            r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=12)
-            if r.status_code != 200:
-                continue
-            root = ET.fromstring(r.content)
-            for item in root.findall(".//item")[:15]:
-                title = (item.findtext("title") or "").strip()
-                link = (item.findtext("link") or "").strip()
-                pub = (item.findtext("pubDate") or "")[:16]
-                if not title or not link:
-                    continue
-                clean_title = title.split(" - ")[0].strip()
-                uid = hashlib.sha256(clean_title.lower().encode()).hexdigest()[:16]
-                if uid in seen:
-                    continue
-                seen.add(uid)
-                results.append({
-                    "id": f"signup_{uid}",
-                    "artist": clean_title[:85],
-                    "city": "Global / Tour Signup",
-                    "when": f"🆕 Signup Alert ({pub})",
-                    "link": link,
-                    "is_presale": True,
-                    "score": 95
-                })
-        except Exception as e:
-            print(f"⚠️ RSS error: {e}")
-
-    print(f"✅ Presale Signups collected: {len(results)}")
-    return results
-
 def filter_new_ids(items):
-    """Checks Supabase for already sent IDs; never drops items if DB fails."""
     if not SUPABASE_URL or not SUPABASE_KEY:
         return items[:10]
 
@@ -189,7 +205,7 @@ def post_to_discord(title, items, color=3066993):
         lines.append(
             f"**{i}. {it['artist']}** — `{it['city']}`\n"
             f"   {it['when']}\n"
-            f"   🔗 [Open Signup / Ticket Page]({it['link']})"
+            f"   🔗 [Open Signup / Ticket Link]({it['link']})"
         )
     payload = {
         "embeds": [{
@@ -199,33 +215,35 @@ def post_to_discord(title, items, color=3066993):
             "footer": {"text": f"24/7 Presale Radar • {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"}
         }]
     }
-    r = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=12)
-    print(f"📨 Discord '{title}' status: {r.status_code}")
+    requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=12)
 
 def run():
-    print("🚀 Running Self-Contained Presale & High-Sale Radar...")
-    all_items = get_presale_signup_news() + get_ticketmaster_sales()
+    print("🚀 Running Presale Signups & Ticketmaster Radar...")
+    signups = get_direct_laylo_seated_signups()
+    tm_sales = get_ticketmaster_sales()
 
-    # Deduplicate by artist + city
-    unique = {}
-    for it in all_items:
+    # Separate alert specifically for Laylo / Seated / Presale Signups
+    new_signups = filter_new_ids(signups)
+    if new_signups:
+        post_to_discord("🎟️ NEW PRESALE SIGNUPS (LAYLO / SEATED / ARTIST RSVP)", new_signups[:10], color=10181046)
+    elif signups:
+        post_to_discord("🎟️ ACTIVE PRESALE SIGNUP RADAR (LAYLO / SEATED / RSVP)", signups[:8], color=10181046)
+
+    # Ticketmaster upcoming presales & high-demand sales
+    unique_tm = {}
+    for it in tm_sales:
         key = f"{it['artist'].lower()}|{it['city'].lower()}"
-        if key not in unique or it["score"] > unique[key]["score"]:
-            unique[key] = it
+        if key not in unique_tm or it["score"] > unique_tm[key]["score"]:
+            unique_tm[key] = it
 
-    ranked = sorted(unique.values(), key=lambda x: x["score"], reverse=True)
-    print(f"🛡️ Total unique verified sales/signups: {len(ranked)}")
+    ranked_tm = sorted(unique_tm.values(), key=lambda x: x["score"], reverse=True)
+    new_tm = filter_new_ids(ranked_tm)
 
-    new_items = filter_new_ids(ranked)
-    print(f"🆕 Brand-new alerts: {len(new_items)}")
+    if new_tm:
+        post_to_discord("🆕 NEW TICKETMASTER PRESALES & ONSALES DETECTED!", new_tm[:10], color=3066993)
 
-    if new_items:
-        post_to_discord("🆕 NEW PRESALE SIGNUPS & TOUR ANNOUNCEMENTS!", new_items[:10], color=3066993)
-
-    if ranked:
-        post_to_discord("⚡ HOURLY HIGH-DEMAND SALE & PRESALE RADAR", ranked[:10], color=15105570)
-    else:
-        post_to_discord("⚡ HOURLY RADAR STATUS", [{"artist": "No events returned from API", "city": "Check Logs", "when": "Verify API Key", "link": "https://developer.ticketmaster.com"}], color=15158332)
+    if ranked_tm:
+        post_to_discord("⚡ HOURLY HIGH-DEMAND SALE & PRESALE RADAR", ranked_tm[:10], color=15105570)
 
 if __name__ == "__main__":
     run()
