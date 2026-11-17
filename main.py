@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 
 from fetchers.ticketmaster import fetch_ticketmaster_events
 from fetchers.social_discovery import fetch_x_twitter_announcements
+from fetchers.laylo_seated import fetch_laylo_and_seated_signups
 from engine import verify_and_rank_events, filter_new_and_save_to_db
 from discord_notifier import send_discord_event_report
 
@@ -26,7 +27,7 @@ def send_hourly_high_sale_radar(ranked_events):
 
     high_sales = [ev for ev in ranked_events if ev.get("has_presale") or ev.get("rank_score", 0) >= 80]
     if not high_sales:
-        high_sales = ranked_events[:5]
+        high_sales = ranked_events[:8]
 
     lines = []
     for i, ev in enumerate(high_sales[:8], 1):
@@ -66,8 +67,12 @@ def run_discovery_pipeline():
     all_raw_events = []
 
     print("🔍 Scanning Ticketmaster & Live Nation for Upcoming Presales & Sales...")
-    all_raw_events.extend(fetch_ticketmaster_events(size=100))
+    all_raw_events.extend(fetch_ticketmaster_events(size=200))
 
+    print("🔍 Scanning Laylo & Seated for Active Presale RSVP Signups...")
+    all_raw_events.extend(fetch_laylo_and_seated_signups())
+
+    print("🔍 Scanning X (Twitter) Announcements...")
     all_raw_events.extend(fetch_x_twitter_announcements())
 
     print(f"📦 Total upcoming sale/presale events found: {len(all_raw_events)}")
