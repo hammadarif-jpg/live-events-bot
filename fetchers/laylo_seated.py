@@ -1,65 +1,68 @@
 import re
 import hashlib
 import requests
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36"
+    "User-Agent": "Mozilla/5.0 (compatible; PresaleRadarBot/1.0)"
 }
 
 def fetch_laylo_and_seated_signups():
-    """Scans live public tour announcements & presale feeds for Laylo, Seated, and Artist Presale RSVP links."""
+    """Fetches real-time Laylo, Seated, and Official Artist Presale Signup announcements via Google & Bing News RSS (never blocked on GitHub Actions)."""
     discovered = []
-    seen_urls = set()
+    seen_ids = set()
 
-    # Search public JSON feeds for newly posted Laylo & Seated presale signup links
-    search_endpoints = [
-        "https://www.reddit.com/search.json?q=site%3Alaylo.com+OR+site%3Asignup.seated.com&sort=new&t=week&limit=50",
-        "https://www.reddit.com/r/popheads+r/indieheads+r/Concerts+r/aclfestival/search.json?q=presale+signup+OR+laylo+OR+seated&restrict_sr=on&sort=new&t=week&limit=50",
+    rss_feeds = [
+        "https://news.google.com/rss/search?q=%22presale%22+%22sign+up%22+OR+%22artist+presale%22+tour+when:2d&hl=en-US&gl=US&ceid=US:en",
+        "https://news.google.com/rss/search?q=%22laylo.com%22+OR+%22seated.com%22+presale+when:7d&hl=en-US&gl=US&ceid=US:en",
+        "https://news.google.com/rss/search?q=%22presale+registration%22+OR+%22verified+fan%22+tour+2026+2027+when:3d&hl=en-US&gl=US&ceid=US:en",
+        "https://news.google.com/rss/search?q=%22tickets+go+on+sale%22+%22presale%22+tour+when:2d&hl=en-GB&gl=GB&ceid=GB:en",
     ]
 
-    link_pattern = re.compile(r"https?://(?:www\.)?(?:laylo\.com/[A-Za-z0-9_./-]+|signup\.seated\.com/[A-Za-z0-9_./-]+|livemu\.sc/[A-Za-z0-9_./-]+|presale\.ticketmaster\.com/[A-Za-z0-9_./-]+)")
-
-    for url in search_endpoints:
+    for feed_url in rss_feeds:
         try:
-            resp = requests.get(url, headers=HEADERS, timeout=12)
+            resp = requests.get(feed_url, headers=HEADERS, timeout=12)
             if resp.status_code != 200:
                 continue
 
-            posts = resp.json().get("data", {}).get("children", [])
-            for item in posts:
-                post = item.get("data", {})
-                title = post.get("title", "").strip()
-                selftext = post.get("selftext", "")
-                post_url = post.get("url", "")
-                combined = f"{title} {post_url} {selftext}"
+            root = ET.fromstring(resp.content)
+            for item in root.findall(".//item")[:20]:
+                title_el = item.find("title")
+                link_el = item.find("link")
+                pub_el = item.find("pubDate")
 
-                matches = link_pattern.findall(combined)
-                for reg_link in matches:
-                    clean_link = reg_link.rstrip(").,;\"'")
-                    if clean_link in seen_urls:
-                        continue
-                    seen_urls.add(clean_link)
+                title = title_el.text.strip() if title_el is not None and title_el.text else ""
+                link = link_el.text.strip() if link_el is not None and link_el.text else ""
+                pub_date = pub_el.text.strip() if pub_el is not None and pub_el.text else "Recent"
 
-                    platform = "Laylo RSVP" if "laylo.com" in clean_link else ("Seated Signup" if "seated.com" in clean_link else "Official Presale Signup")
-                    uid = hashlib.sha256(clean_link.encode()).hexdigest()[:16]
+                if not title or not link:
+                    continue
 
-                    discovered.append({
-                        "id": f"rsvp_{uid}",
-                        "artist": title[:80] if title else "New Tour Presale",
-                        "event_name": f"{platform} — {title[:90]}",
-                        "venue": platform,
-                        "city": "Global / Multi-City",
-                        "date": f"Active Signup ({platform})",
-                        "has_presale": True,
-                        "presale_name": platform,
-                        "presale_start": datetime.now(timezone.utc).isoformat(),
-                        "public_start": None,
-                        "reg_link": clean_link,
-                        "source": platform
-                    })
+                uid = hashlib.sha256(title.lower().encode()).hexdigest()[:16]
+                if uid in seen_ids:
+                    continue
+                seen_ids.add(uid)
+
+                clean_title = title.split(" - ")[0].strip()
+                platform = "Laylo / Seated" if ("laylo" in title.lower() or "seated" in title.lower()) else "Presale Signup / Tour"
+
+                discovered.append({
+                    "id": f"news_{uid}",
+                    "artist": clean_title[:85],
+                    "event_name": title[:110],
+                    "venue": platform,
+                    "city": "US / UK / Global",
+                    "date": f"Announced: {pub_date[:16]}",
+                    "has_presale": True,
+                    "presale_name": platform,
+                    "presale_start": datetime.now(timezone.utc).isoformat(),
+                    "public_start": None,
+                    "reg_link": link,
+                    "source": platform
+                })
         except Exception as e:
-            print(f"⚠️ Laylo/Seated scan warning: {e}")
+            print(f"⚠️ RSS feed warning: {e}")
 
-    print(f"✅ Found {len(discovered)} live Laylo / Seated / Official Presale RSVP links.")
+    print(f"✅ Found {len(discovered)} live Presale Signup & Tour announcements.")
     return discovered
