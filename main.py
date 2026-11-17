@@ -1,95 +1,91 @@
 import os
-import requests
 from datetime import datetime, timezone
-from dotenv import load_dotenv
+from supabase import create_client
 
-from fetchers.ticketmaster import fetch_ticketmaster_events
-from fetchers.social_discovery import fetch_x_twitter_announcements
-from fetchers.laylo_seated import fetch_laylo_and_seated_signups
-from engine import verify_and_rank_events, filter_new_and_save_to_db
-from discord_notifier import send_discord_event_report
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-load_dotenv(override=True)
+def get_supabase():
+    if SUPABASE_URL and SUPABASE_KEY:
+        try:
+            return create_client(SUPABASE_URL, SUPABASE_KEY)
+        except Exception as e:
+            print(f"⚠️ Supabase connection warning: {e}")
+    return None
 
-DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
+def verify_and_rank_events(raw_events, preferred_artists=None):
+    """Validates, deduplicates, and ranks all upcoming presale & sale events."""
+    if not raw_events:
+        return []
 
-PREFERRED_ARTISTS = [
-    "Taylor Swift", "Drake", "Coldplay", "Oasis", "Stray Kids",
-    "Bruno Mars", "The Weeknd", "Sabrina Carpenter", "Bad Bunny", "Morgan Wallen",
-    "Olivia Rodrigo", "Billie Eilish", "Kendrick Lamar", "Lady Gaga", "Post Malone",
-    "Ed Sheeran", "Beyonce", "Ariana Grande", "Travis Scott", "Dua Lipa"
-]
+    preferred_lower = [a.lower() for a in (preferred_artists or [])]
+    seen_keys = set()
+    verified = []
 
-def send_hourly_high_sale_radar(ranked_events):
-    """Sends an hourly update of Top High-Demand Upcoming Sales & Presales to Discord in English."""
-    if not DISCORD_WEBHOOK_URL:
-        return
+    for ev in raw_events:
+        artist = str(ev.get("artist") or ev.get("event_name") or "").strip()
+        reg_link = str(ev.get("reg_link") or ev.get("url") or "").strip()
+        if not artist or not reg_link:
+            continue
 
-    high_sales = [ev for ev in ranked_events if ev.get("has_presale") or ev.get("rank_score", 0) >= 80]
-    if not high_sales:
-        high_sales = ranked_events[:8]
+        # Deduplicate by artist + city + presale/sale date
+        dedup_key = f"{artist.lower()}|{str(ev.get('city', '')).lower()}|{str(ev.get('date', '')).lower()}"
+        if dedup_key in seen_keys:
+            continue
+        seen_keys.add(dedup_key)
 
-    lines = []
-    for i, ev in enumerate(high_sales[:8], 1):
-        status_tag = "🎟️ PRESALE" if ev.get("has_presale") else "🔥 PUBLIC SALE"
-        lines.append(
-            f"**{i}. {ev['artist']}** — {ev['city']} ({status_tag})\n"
-            f"   ⏰ {ev['date']}\n"
-            f"   🔗 [Signup / Ticket Link]({ev['reg_link']})"
-        )
+        # Smart demand scoring
+        score = 60
+        if ev.get("has_presale"):
+            score += 25
+        if any(pref in artist.lower() for pref in preferred_lower):
+            score += 30
+        source = str(ev.get("source", ""))
+        if "Laylo" in source or "Seated" in source or "Presale" in source:
+            score += 15
 
-    summary_text = "\n\n".join(lines) if lines else "No high-demand upcoming sales currently in the queue."
+        ev["artist"] = artist
+        ev["reg_link"] = reg_link
+        ev["city"] = ev.get("city") or "Global"
+        ev["date"] = ev.get("date") or "Upcoming Presale / Sale"
+        ev["rank_score"] = score
+        verified.append(ev)
 
-    payload = {
-        "embeds": [
-            {
-                "title": "⚡ HOURLY HIGH-DEMAND SALE & PRESALE RADAR",
-                "description": (
-                    f"Live hourly update — top upcoming high-demand sales and active presale signups:\n\n"
-                    f"{summary_text}"
-                ),
-                "color": 15105570,
-                "footer": {
-                    "text": f"Hourly Radar • {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"
-                }
-            }
-        ]
-    }
-    try:
-        requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=10)
-        print("⚡ Hourly High-Sale Radar sent to Discord!")
-    except Exception as e:
-        print(f"⚠️ Failed to send hourly radar: {e}")
+    # Sort highest priority & presales first
+    verified.sort(key=lambda x: x["rank_score"], reverse=True)
+    return verified
 
-def run_discovery_pipeline():
-    now_utc = datetime.now(timezone.utc)
-    print(f"🚀 Starting Hourly Presale & High-Sale Radar at {now_utc.strftime('%Y-%m-%d %H:%M:%S UTC')}...")
-    all_raw_events = []
+def filter_new_and_save_to_db(ranked_events):
+    """Filters out already-alerted events using Supabase and saves new ones."""
+    if not ranked_events:
+        return []
 
-    print("🔍 Scanning Ticketmaster & Live Nation for Upcoming Presales & Sales...")
-    all_raw_events.extend(fetch_ticketmaster_events(size=200))
+    sb = get_supabase()
+    if not sb:
+        print("⚠️ Supabase not configured; returning top new events directly.")
+        return ranked_events[:10]
 
-    print("🔍 Scanning Laylo & Seated for Active Presale RSVP Signups...")
-    all_raw_events.extend(fetch_laylo_and_seated_signups())
+    new_events = []
+    for ev in ranked_events:
+        ev_id = str(ev.get("id") or ev.get("reg_link"))
+        try:
+            existing = sb.table("seen_events").select("event_id").eq("event_id", ev_id).execute()
+            if existing.data:
+                continue
 
-    print("🔍 Scanning X (Twitter) Announcements...")
-    all_raw_events.extend(fetch_x_twitter_announcements())
+            sb.table("seen_events").insert({
+                "event_id": ev_id,
+                "artist": ev.get("artist", "")[:200],
+                "url": ev.get("reg_link", "")[:500],
+                "created_at": datetime.now(timezone.utc).isoformat()
+            }).execute()
+            new_events.append(ev)
+        except Exception as e:
+            # If table column names differ slightly, try minimal insert
+            try:
+                sb.table("seen_events").insert({"event_id": ev_id}).execute()
+                new_events.append(ev)
+            except Exception:
+                print(f"⚠️ DB check warning for {ev_id}: {e}")
 
-    print(f"📦 Total upcoming sale/presale events found: {len(all_raw_events)}")
-
-    ranked_events = verify_and_rank_events(all_raw_events, preferred_artists=PREFERRED_ARTISTS)
-    print(f"🛡️ Verified & ranked upcoming sales: {len(ranked_events)}")
-
-    brand_new_events = filter_new_and_save_to_db(ranked_events)
-    print(f"🆕 Brand-new presale/sale alerts to send: {len(brand_new_events)}")
-
-    if brand_new_events:
-        send_discord_event_report(
-            brand_new_events[:15],
-            report_title="🆕 NEW PRESALE SIGNUP / TOUR ANNOUNCEMENT DETECTED!"
-        )
-
-    send_hourly_high_sale_radar(ranked_events)
-
-if __name__ == "__main__":
-    run_discovery_pipeline()
+    return new_events
