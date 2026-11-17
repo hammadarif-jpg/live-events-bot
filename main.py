@@ -1,8 +1,6 @@
 import os
-import re
 import hashlib
 import requests
-from urllib.parse import unquote
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 
@@ -10,6 +8,7 @@ load_dotenv(override=True)
 
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 TICKETMASTER_API_KEY = os.getenv("TICKETMASTER_API_KEY")
+SERPER_API_KEY = os.getenv("SERPER_API_KEY")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
@@ -30,69 +29,56 @@ def parse_iso(dt_str):
         return None
 
 def get_direct_laylo_seated_signups():
-    """Scrapes real direct laylo.com and signup.seated.com RSVP pages from web search."""
+    """Fetches real direct laylo.com and signup.seated.com RSVP pages via Google Search API (Serper)."""
+    if not SERPER_API_KEY:
+        print("⚠️ SERPER_API_KEY missing in GitHub Secrets! Add it to get Laylo & Seated signups.")
+        return []
+
     results = []
     seen_urls = set()
 
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-        "Accept-Language": "en-US,en;q=0.9"
-    }
-
-    search_queries = [
-        ("site:laylo.com presale OR tour OR rsvp", "LAYLO RSVP"),
-        ("site:signup.seated.com presale OR tour", "SEATED SIGNUP"),
-        ("site:laylo.com/m/ 2026 OR 2027", "LAYLO RSVP"),
-        ("site:signup.seated.com/events/", "SEATED SIGNUP"),
+    queries = [
+        ("site:laylo.com/m/ OR site:laylo.com presale OR tour OR rsvp", "LAYLO RSVP"),
+        ("site:signup.seated.com/events/ OR site:signup.seated.com presale", "SEATED SIGNUP"),
     ]
 
-    for q, platform_tag in search_queries:
+    for q, platform_tag in queries:
         try:
             resp = requests.post(
-                "https://html.duckduckgo.com/html/",
-                data={"q": q, "df": "w"},  # df=w means past week only!
-                headers=headers,
+                "https://google.serper.dev/search",
+                headers={"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"},
+                json={"q": q, "num": 20, "tbs": "qdr:w"},  # qdr:w = indexed in past 7 days
                 timeout=15
             )
             if resp.status_code != 200:
-                print(f"⚠️ DDG status {resp.status_code} for {q}")
+                print(f"⚠️ Serper API error ({resp.status_code}): {resp.text[:120]}")
                 continue
 
-            html = resp.text
-            # Extract result links & titles from DuckDuckGo HTML
-            blocks = re.findall(r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>', html, re.S)
-            for raw_href, raw_title in blocks:
-                # Decode DuckDuckGo redirect URL if wrapped in uddg=
-                if "uddg=" in raw_href:
-                    m = re.search(r'uddg=([^&]+)', raw_href)
-                    clean_url = unquote(m.group(1)) if m else raw_href
-                else:
-                    clean_url = raw_href
+            organic = resp.json().get("organic", [])
+            for item in organic:
+                link = (item.get("link") or "").split("?")[0].rstrip("/")
+                title = (item.get("title") or "").strip()
+                snippet = (item.get("snippet") or "").strip()
 
-                if "laylo.com" not in clean_url and "seated.com" not in clean_url:
+                if not link or link in seen_urls:
+                    continue
+                if link in ("https://laylo.com", "https://signup.seated.com", "https://www.laylo.com"):
                     continue
 
-                clean_url = clean_url.split("?")[0].rstrip("/")
-                if clean_url in seen_urls or clean_url in ("https://laylo.com", "https://signup.seated.com"):
-                    continue
-                seen_urls.add(clean_url)
+                seen_urls.add(link)
+                uid = hashlib.sha256(link.encode()).hexdigest()[:16]
 
-                title = re.sub(r"<[^>]+>", "", raw_title).strip()
-                if not title:
-                    title = clean_url.split("/")[-1]
-
-                uid = hashlib.sha256(clean_url.encode()).hexdigest()[:16]
                 results.append({
                     "id": f"rsvp_{uid}",
-                    "artist": title[:90],
+                    "artist": title[:90] if title else link.split("/")[-1],
                     "city": platform_tag,
-                    "when": f"🎟️ Direct {platform_tag} Page",
-                    "link": clean_url,
+                    "when": f"🎟️ {snippet[:95]}" if snippet else f"🎟️ Direct {platform_tag} Page",
+                    "link": link,
                     "is_presale": True,
                     "score": 120
                 })
         except Exception as e:
-            print(f"⚠️ Search error for {q}: {e}")
+            print(f"⚠️ Serper exception: {e}")
 
     print(f"✅ Direct Laylo & Seated URLs found: {len(results)}")
     return results
