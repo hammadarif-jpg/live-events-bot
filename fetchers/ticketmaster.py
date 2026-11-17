@@ -15,33 +15,31 @@ def parse_iso(dt_str):
 
 def fetch_ticketmaster_events(size=200):
     if not TICKETMASTER_API_KEY:
-        print("⚠️ Missing TICKETMASTER_API_KEY")
+        print("❌ ERROR: TICKETMASTER_API_KEY is missing in GitHub Secrets!")
         return []
 
     now_utc = datetime.now(timezone.utc)
+    now_str = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
     collected = []
     seen_ids = set()
 
+    # Fetch upcoming sales & newly announced presales across US, UK, Canada, EU, AU
     queries = [
-        {"countryCode": "US", "classificationName": "Music", "sort": "date,asc", "size": 200},
-        {"countryCode": "GB", "classificationName": "Music", "sort": "date,asc", "size": 150},
-        {"countryCode": "CA", "classificationName": "Music", "sort": "date,asc", "size": 100},
-        {"countryCode": "DE", "classificationName": "Music", "sort": "date,asc", "size": 100},
-        {"countryCode": "FR", "classificationName": "Music", "sort": "date,asc", "size": 100},
-        {"countryCode": "AU", "classificationName": "Music", "sort": "date,asc", "size": 100},
+        {"countryCode": "US", "classificationName": "Music", "onsaleStartDateTime": now_str, "size": 200},
+        {"countryCode": "GB", "classificationName": "Music", "onsaleStartDateTime": now_str, "size": 150},
+        {"countryCode": "CA", "classificationName": "Music", "onsaleStartDateTime": now_str, "size": 100},
+        {"countryCode": "AU", "classificationName": "Music", "onsaleStartDateTime": now_str, "size": 100},
+        {"countryCode": "DE", "classificationName": "Music", "onsaleStartDateTime": now_str, "size": 100},
+        # Also catch Comedy (like David Cross) & newly announced events with future presales
+        {"countryCode": "US,GB,CA,AU", "classificationName": "Comedy", "onsaleStartDateTime": now_str, "size": 100},
     ]
 
     for q in queries:
-        params = {
-            "apikey": TICKETMASTER_API_KEY,
-            "startDateTime": now_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            **q
-        }
-
+        params = {"apikey": TICKETMASTER_API_KEY, **q}
         try:
             resp = requests.get(BASE_URL, params=params, timeout=15)
             if resp.status_code != 200:
-                print(f"⚠️ Ticketmaster API warning ({resp.status_code}): {resp.text[:120]}")
+                print(f"⚠️ Ticketmaster API error ({resp.status_code}): {resp.text[:150]}")
                 continue
 
             events = resp.json().get("_embedded", {}).get("events", [])
@@ -89,11 +87,8 @@ def fetch_ticketmaster_events(size=200):
                 if best_presale:
                     sale_info = f"Presale ({best_presale['name']}): {best_presale['start'].strftime('%Y-%m-%d %H:%M UTC')}"
                     reg_link = best_presale["url"] or ev.get("url", "")
-                elif has_future_public:
-                    sale_info = f"Public Sale: {public_start.strftime('%Y-%m-%d %H:%M UTC')}"
-                    reg_link = ev.get("url", "")
                 else:
-                    sale_info = "Upcoming Presale / TBD"
+                    sale_info = f"Public Sale: {public_start.strftime('%Y-%m-%d %H:%M UTC')}"
                     reg_link = ev.get("url", "")
 
                 collected.append({
@@ -110,9 +105,8 @@ def fetch_ticketmaster_events(size=200):
                     "reg_link": reg_link,
                     "source": "Ticketmaster"
                 })
-
         except Exception as e:
-            print(f"⚠️ Error fetching Ticketmaster batch: {e}")
+            print(f"⚠️ Ticketmaster exception: {e}")
 
-    print(f"✅ Fetched {len(collected)} verified upcoming presale/sale events across US/GB/CA/DE/FR/AU.")
+    print(f"✅ Ticketmaster verified upcoming sales/presales: {len(collected)}")
     return collected
