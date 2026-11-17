@@ -2,7 +2,7 @@ import os
 import re
 import hashlib
 import requests
-import xml.etree.ElementTree as ET
+from urllib.parse import unquote
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 
@@ -30,60 +30,71 @@ def parse_iso(dt_str):
         return None
 
 def get_direct_laylo_seated_signups():
-    """Fetches direct Laylo, Seated, and Artist Presale RSVP signup links."""
+    """Scrapes real direct laylo.com and signup.seated.com RSVP pages from web search."""
     results = []
-    seen = set()
+    seen_urls = set()
 
-    # Targeted RSS + web discovery specifically for Laylo, Seated & Artist Presale signups
-    queries = [
-        "https://news.google.com/rss/search?q=%22signup.seated.com%22+OR+%22seated.com%22+presale+when:7d&hl=en-US&gl=US&ceid=US:en",
-        "https://news.google.com/rss/search?q=%22laylo.com%22+presale+OR+tour+when:7d&hl=en-US&gl=US&ceid=US:en",
-        "https://news.google.com/rss/search?q=%22sign+up+for+presale%22+OR+%22register+for+presale%22+tour+when:3d&hl=en-US&gl=US&ceid=US:en",
-        "https://news.google.com/rss/search?q=%22artist+presale%22+%22sign+up%22+2026+OR+2027+when:3d&hl=en-US&gl=US&ceid=US:en",
-        "https://news.google.com/rss/search?q=%22presale+sign-up%22+OR+%22presale+signup%22+tickets+when:3d&hl=en-GB&gl=GB&ceid=GB:en",
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9"
+    }
+
+    search_queries = [
+        ("site:laylo.com presale OR tour OR rsvp", "LAYLO RSVP"),
+        ("site:signup.seated.com presale OR tour", "SEATED SIGNUP"),
+        ("site:laylo.com/m/ 2026 OR 2027", "LAYLO RSVP"),
+        ("site:signup.seated.com/events/", "SEATED SIGNUP"),
     ]
 
-    for url in queries:
+    for q, platform_tag in search_queries:
         try:
-            r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=12)
-            if r.status_code != 200:
+            resp = requests.post(
+                "https://html.duckduckgo.com/html/",
+                data={"q": q, "df": "w"},  # df=w means past week only!
+                headers=headers,
+                timeout=15
+            )
+            if resp.status_code != 200:
+                print(f"⚠️ DDG status {resp.status_code} for {q}")
                 continue
-            root = ET.fromstring(r.content)
-            for item in root.findall(".//item")[:15]:
-                title = (item.findtext("title") or "").strip()
-                link = (item.findtext("link") or "").strip()
-                pub = (item.findtext("pubDate") or "")[:16]
-                if not title or not link:
-                    continue
 
-                clean_title = title.split(" - ")[0].strip()
-                uid = hashlib.sha256(clean_title.lower().encode()).hexdigest()[:16]
-                if uid in seen:
-                    continue
-                seen.add(uid)
-
-                low = title.lower()
-                if "seated" in low:
-                    tag = "SEATED SIGNUP"
-                elif "laylo" in low:
-                    tag = "LAYLO RSVP"
+            html = resp.text
+            # Extract result links & titles from DuckDuckGo HTML
+            blocks = re.findall(r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>', html, re.S)
+            for raw_href, raw_title in blocks:
+                # Decode DuckDuckGo redirect URL if wrapped in uddg=
+                if "uddg=" in raw_href:
+                    m = re.search(r'uddg=([^&]+)', raw_href)
+                    clean_url = unquote(m.group(1)) if m else raw_href
                 else:
-                    tag = "PRESALE SIGNUP"
+                    clean_url = raw_href
 
+                if "laylo.com" not in clean_url and "seated.com" not in clean_url:
+                    continue
+
+                clean_url = clean_url.split("?")[0].rstrip("/")
+                if clean_url in seen_urls or clean_url in ("https://laylo.com", "https://signup.seated.com"):
+                    continue
+                seen_urls.add(clean_url)
+
+                title = re.sub(r"<[^>]+>", "", raw_title).strip()
+                if not title:
+                    title = clean_url.split("/")[-1]
+
+                uid = hashlib.sha256(clean_url.encode()).hexdigest()[:16]
                 results.append({
                     "id": f"rsvp_{uid}",
-                    "artist": clean_title[:90],
-                    "city": tag,
-                    "when": f"🎟️ {tag} • {pub}",
-                    "link": link,
+                    "artist": title[:90],
+                    "city": platform_tag,
+                    "when": f"🎟️ Direct {platform_tag} Page",
+                    "link": clean_url,
                     "is_presale": True,
-                    "is_signup": True,
-                    "score": 110
+                    "score": 120
                 })
         except Exception as e:
-            print(f"⚠️ Signup RSS warning: {e}")
+            print(f"⚠️ Search error for {q}: {e}")
 
-    print(f"✅ Direct Laylo/Seated/Presale Signups found: {len(results)}")
+    print(f"✅ Direct Laylo & Seated URLs found: {len(results)}")
     return results
 
 def get_ticketmaster_sales():
@@ -156,7 +167,6 @@ def get_ticketmaster_sales():
                     "when": when_str,
                     "link": link,
                     "is_presale": is_presale,
-                    "is_signup": False,
                     "score": score
                 })
         except Exception as e:
@@ -218,18 +228,16 @@ def post_to_discord(title, items, color=3066993):
     requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=12)
 
 def run():
-    print("🚀 Running Presale Signups & Ticketmaster Radar...")
+    print("🚀 Running Direct Laylo/Seated + Ticketmaster Radar...")
     signups = get_direct_laylo_seated_signups()
     tm_sales = get_ticketmaster_sales()
 
-    # Separate alert specifically for Laylo / Seated / Presale Signups
     new_signups = filter_new_ids(signups)
     if new_signups:
-        post_to_discord("🎟️ NEW PRESALE SIGNUPS (LAYLO / SEATED / ARTIST RSVP)", new_signups[:10], color=10181046)
+        post_to_discord("🎟️ NEW LAYLO & SEATED PRESALE SIGNUPS!", new_signups[:10], color=10181046)
     elif signups:
-        post_to_discord("🎟️ ACTIVE PRESALE SIGNUP RADAR (LAYLO / SEATED / RSVP)", signups[:8], color=10181046)
+        post_to_discord("🎟️ ACTIVE LAYLO & SEATED SIGNUP LINKS", signups[:10], color=10181046)
 
-    # Ticketmaster upcoming presales & high-demand sales
     unique_tm = {}
     for it in tm_sales:
         key = f"{it['artist'].lower()}|{it['city'].lower()}"
