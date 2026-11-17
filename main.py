@@ -14,7 +14,6 @@ def get_supabase():
     return None
 
 def verify_and_rank_events(raw_events, preferred_artists=None):
-    """Validates, deduplicates, and ranks all upcoming presale & sale events."""
     if not raw_events:
         return []
 
@@ -28,13 +27,11 @@ def verify_and_rank_events(raw_events, preferred_artists=None):
         if not artist or not reg_link:
             continue
 
-        # Deduplicate by artist + city + presale/sale date
         dedup_key = f"{artist.lower()}|{str(ev.get('city', '')).lower()}|{str(ev.get('date', '')).lower()}"
         if dedup_key in seen_keys:
             continue
         seen_keys.add(dedup_key)
 
-        # Smart demand scoring
         score = 60
         if ev.get("has_presale"):
             score += 25
@@ -51,12 +48,10 @@ def verify_and_rank_events(raw_events, preferred_artists=None):
         ev["rank_score"] = score
         verified.append(ev)
 
-    # Sort highest priority & presales first
     verified.sort(key=lambda x: x["rank_score"], reverse=True)
     return verified
 
 def filter_new_and_save_to_db(ranked_events):
-    """Filters out already-alerted events using Supabase and saves new ones."""
     if not ranked_events:
         return []
 
@@ -80,12 +75,11 @@ def filter_new_and_save_to_db(ranked_events):
                 "created_at": datetime.now(timezone.utc).isoformat()
             }).execute()
             new_events.append(ev)
-        except Exception as e:
-            # If table column names differ slightly, try minimal insert
+        except Exception:
             try:
                 sb.table("seen_events").insert({"event_id": ev_id}).execute()
                 new_events.append(ev)
-            except Exception:
-                print(f"⚠️ DB check warning for {ev_id}: {e}")
+            except Exception as e2:
+                print(f"⚠️ DB insert warning: {e2}")
 
     return new_events
