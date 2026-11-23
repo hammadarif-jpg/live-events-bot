@@ -6,11 +6,11 @@ from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
-DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
-TICKETMASTER_API_KEY = os.getenv("TICKETMASTER_API_KEY")
-SERPER_API_KEY = os.getenv("SERPER_API_KEY")
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+DISCORD_WEBHOOK_URL = (os.getenv("DISCORD_WEBHOOK_URL") or "").strip()
+TICKETMASTER_API_KEY = (os.getenv("TICKETMASTER_API_KEY") or "").strip()
+SERPER_API_KEY = (os.getenv("SERPER_API_KEY") or "").strip()
+SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").strip().rstrip("/")
+SUPABASE_KEY = (os.getenv("SUPABASE_KEY") or "").strip()
 
 PREFERRED_ARTISTS = [
     "taylor swift", "drake", "coldplay", "oasis", "stray kids", "gracie abrams",
@@ -29,18 +29,20 @@ def parse_iso(dt_str):
         return None
 
 def get_direct_laylo_seated_signups():
-    """Fetches real direct laylo.com and signup.seated.com RSVP pages via Serper Google Search API."""
+    """Fetches direct laylo.com and signup.seated.com RSVP pages using free-tier-compatible Serper queries."""
     if not SERPER_API_KEY:
-        print("❌ SERPER_API_KEY is missing in GitHub Secrets / bot.yml!")
+        print("❌ SERPER_API_KEY is missing!")
         return []
 
     results = []
     seen_urls = set()
 
+    # Free-account friendly queries (no site: or tbs: operators)
     queries = [
-        ("site:laylo.com presale OR rsvp OR tour", "LAYLO RSVP"),
-        ("site:signup.seated.com", "SEATED SIGNUP"),
-        ("site:laylo.com/m/", "LAYLO RSVP"),
+        ("laylo.com presale tour rsvp 2026 2027", "LAYLO RSVP"),
+        ("signup.seated.com presale tour 2026 2027", "SEATED SIGNUP"),
+        ("laylo.com/m/ presale", "LAYLO RSVP"),
+        ("signup.seated.com/events/", "SEATED SIGNUP"),
     ]
 
     for q, platform_tag in queries:
@@ -48,7 +50,7 @@ def get_direct_laylo_seated_signups():
             resp = requests.post(
                 "https://google.serper.dev/search",
                 headers={"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"},
-                json={"q": q, "num": 25, "tbs": "qdr:m"},
+                json={"q": q, "num": 20},
                 timeout=15
             )
             if resp.status_code != 200:
@@ -62,7 +64,9 @@ def get_direct_laylo_seated_signups():
 
                 if not link or link in seen_urls:
                     continue
-                if link in ("https://laylo.com", "https://signup.seated.com", "https://www.laylo.com"):
+                if "laylo.com" not in link and "seated.com" not in link:
+                    continue
+                if link in ("https://laylo.com", "https://signup.seated.com", "https://www.laylo.com", "https://www.seated.com"):
                     continue
 
                 seen_urls.add(link)
@@ -161,10 +165,9 @@ def get_ticketmaster_sales():
     return results
 
 def filter_new_ids(items):
-    """Strictly filters out already-sent items via Supabase so nothing ever repeats."""
+    """Strictly filters out already-sent items via Supabase; falls back safely if DB errors."""
     if not SUPABASE_URL or not SUPABASE_KEY:
-        print("⚠️ Supabase keys missing; sending top 5 only.")
-        return items[:5]
+        return items[:10]
 
     headers = {
         "apikey": SUPABASE_KEY,
@@ -194,8 +197,10 @@ def filter_new_ids(items):
                 new_items.append(item)
             else:
                 print(f"⚠️ Supabase insert status {ins.status_code}: {ins.text[:100]}")
+                new_items.append(item)
         except Exception as e:
             print(f"⚠️ Supabase error: {e}")
+            new_items.append(item)
 
     return new_items
 
@@ -217,7 +222,8 @@ def post_to_discord(title, items, color=3066993):
             "footer": {"text": f"24/7 Presale Radar • {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"}
         }]
     }
-    requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=12)
+    r = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=12)
+    print(f"📨 Discord '{title}' status: {r.status_code}")
 
 def run():
     print("🚀 Running Zero-Repeat Laylo/Seated + Ticketmaster Radar...")
@@ -229,7 +235,7 @@ def run():
     if new_signups:
         post_to_discord("🎟️ NEW LAYLO & SEATED PRESALE SIGNUPS!", new_signups[:10], color=10181046)
 
-    # 2. Ticketmaster Upcoming Presales & Sales (deduplicated by artist + city)
+    # 2. Ticketmaster Upcoming Presales & Sales
     tm_sales = get_ticketmaster_sales()
     unique_tm = {}
     for it in tm_sales:
