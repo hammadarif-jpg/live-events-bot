@@ -29,17 +29,18 @@ def parse_iso(dt_str):
         return None
 
 def get_direct_laylo_seated_signups():
-    """Fetches real direct laylo.com and signup.seated.com RSVP pages via Google Search API (Serper)."""
+    """Fetches real direct laylo.com and signup.seated.com RSVP pages via Serper Google Search API."""
     if not SERPER_API_KEY:
-        print("⚠️ SERPER_API_KEY missing in GitHub Secrets! Add it to get Laylo & Seated signups.")
+        print("❌ SERPER_API_KEY is missing in GitHub Secrets / bot.yml!")
         return []
 
     results = []
     seen_urls = set()
 
     queries = [
-        ("site:laylo.com/m/ OR site:laylo.com presale OR tour OR rsvp", "LAYLO RSVP"),
-        ("site:signup.seated.com/events/ OR site:signup.seated.com presale", "SEATED SIGNUP"),
+        ("site:laylo.com presale OR rsvp OR tour", "LAYLO RSVP"),
+        ("site:signup.seated.com", "SEATED SIGNUP"),
+        ("site:laylo.com/m/", "LAYLO RSVP"),
     ]
 
     for q, platform_tag in queries:
@@ -47,15 +48,14 @@ def get_direct_laylo_seated_signups():
             resp = requests.post(
                 "https://google.serper.dev/search",
                 headers={"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"},
-                json={"q": q, "num": 20, "tbs": "qdr:w"},  # qdr:w = indexed in past 7 days
+                json={"q": q, "num": 25, "tbs": "qdr:m"},
                 timeout=15
             )
             if resp.status_code != 200:
-                print(f"⚠️ Serper API error ({resp.status_code}): {resp.text[:120]}")
+                print(f"⚠️ Serper error ({resp.status_code}): {resp.text[:120]}")
                 continue
 
-            organic = resp.json().get("organic", [])
-            for item in organic:
+            for item in resp.json().get("organic", []):
                 link = (item.get("link") or "").split("?")[0].rstrip("/")
                 title = (item.get("title") or "").strip()
                 snippet = (item.get("snippet") or "").strip()
@@ -106,8 +106,7 @@ def get_ticketmaster_sales():
             if r.status_code != 200:
                 continue
 
-            events = r.json().get("_embedded", {}).get("events", [])
-            for ev in events:
+            for ev in r.json().get("_embedded", {}).get("events", []):
                 ev_id = ev.get("id")
                 if not ev_id or ev_id in seen:
                     continue
@@ -147,7 +146,7 @@ def get_ticketmaster_sales():
 
                 score = 70 + (25 if is_presale else 0) + (30 if any(a in artist.lower() for a in PREFERRED_ARTISTS) else 0)
                 results.append({
-                    "id": ev_id,
+                    "id": f"tm_{artist.lower()}_{city.lower()}",
                     "artist": artist,
                     "city": city,
                     "when": when_str,
@@ -162,35 +161,42 @@ def get_ticketmaster_sales():
     return results
 
 def filter_new_ids(items):
+    """Strictly filters out already-sent items via Supabase so nothing ever repeats."""
     if not SUPABASE_URL or not SUPABASE_KEY:
-        return items[:10]
+        print("⚠️ Supabase keys missing; sending top 5 only.")
+        return items[:5]
 
     headers = {
         "apikey": SUPABASE_KEY,
         "Authorization": f"Bearer {SUPABASE_KEY}",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        "Prefer": "resolution=ignore-duplicates"
     }
     new_items = []
     for item in items:
         ev_id = item["id"]
         try:
             check = requests.get(
-                f"{SUPABASE_URL}/rest/v1/seen_events?event_id=eq.{ev_id}&select=event_id",
+                f"{SUPABASE_URL}/rest/v1/seen_events?event_id=eq.{requests.utils.quote(ev_id)}&select=event_id",
                 headers=headers,
                 timeout=8
             )
             if check.status_code == 200 and len(check.json()) > 0:
                 continue
 
-            requests.post(
+            ins = requests.post(
                 f"{SUPABASE_URL}/rest/v1/seen_events",
                 headers=headers,
                 json={"event_id": ev_id, "artist": item["artist"][:150], "url": item["link"][:400]},
                 timeout=8
             )
-            new_items.append(item)
-        except Exception:
-            new_items.append(item)
+            if ins.status_code in (200, 201, 204):
+                new_items.append(item)
+            else:
+                print(f"⚠️ Supabase insert status {ins.status_code}: {ins.text[:100]}")
+        except Exception as e:
+            print(f"⚠️ Supabase error: {e}")
+
     return new_items
 
 def post_to_discord(title, items, color=3066993):
@@ -214,30 +220,31 @@ def post_to_discord(title, items, color=3066993):
     requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=12)
 
 def run():
-    print("🚀 Running Direct Laylo/Seated + Ticketmaster Radar...")
-    signups = get_direct_laylo_seated_signups()
-    tm_sales = get_ticketmaster_sales()
+    print("🚀 Running Zero-Repeat Laylo/Seated + Ticketmaster Radar...")
 
+    # 1. Laylo & Seated Direct RSVP Signups
+    signups = get_direct_laylo_seated_signups()
     new_signups = filter_new_ids(signups)
+    print(f"🆕 Brand-new Laylo/Seated signups: {len(new_signups)}")
     if new_signups:
         post_to_discord("🎟️ NEW LAYLO & SEATED PRESALE SIGNUPS!", new_signups[:10], color=10181046)
-    elif signups:
-        post_to_discord("🎟️ ACTIVE LAYLO & SEATED SIGNUP LINKS", signups[:10], color=10181046)
 
+    # 2. Ticketmaster Upcoming Presales & Sales (deduplicated by artist + city)
+    tm_sales = get_ticketmaster_sales()
     unique_tm = {}
     for it in tm_sales:
-        key = f"{it['artist'].lower()}|{it['city'].lower()}"
+        key = it["id"]
         if key not in unique_tm or it["score"] > unique_tm[key]["score"]:
             unique_tm[key] = it
 
     ranked_tm = sorted(unique_tm.values(), key=lambda x: x["score"], reverse=True)
     new_tm = filter_new_ids(ranked_tm)
-
+    print(f"🆕 Brand-new Ticketmaster presales/sales: {len(new_tm)}")
     if new_tm:
-        post_to_discord("🆕 NEW TICKETMASTER PRESALES & ONSALES DETECTED!", new_tm[:10], color=3066993)
+        post_to_discord("🆕 NEW TICKETMASTER PRESALES & ONSALES!", new_tm[:10], color=3066993)
 
-    if ranked_tm:
-        post_to_discord("⚡ HOURLY HIGH-DEMAND SALE & PRESALE RADAR", ranked_tm[:10], color=15105570)
+    if not new_signups and not new_tm:
+        print("😴 No brand-new events this hour — staying quiet to prevent repeats!")
 
 if __name__ == "__main__":
     run()
