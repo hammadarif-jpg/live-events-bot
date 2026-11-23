@@ -37,12 +37,11 @@ def get_direct_laylo_seated_signups():
     results = []
     seen_urls = set()
 
-    # Free-account friendly queries (no site: or tbs: operators)
     queries = [
-        ("laylo.com presale tour rsvp 2026 2027", "LAYLO RSVP"),
-        ("signup.seated.com presale tour 2026 2027", "SEATED SIGNUP"),
-        ("laylo.com/m/ presale", "LAYLO RSVP"),
-        ("signup.seated.com/events/", "SEATED SIGNUP"),
+        ("laylo.com presale tour", "LAYLO RSVP"),
+        ("signup.seated.com presale tour", "SEATED SIGNUP"),
+        ("presale rsvp laylo", "LAYLO RSVP"),
+        ("presale signup seated", "SEATED SIGNUP"),
     ]
 
     for q, platform_tag in queries:
@@ -64,9 +63,11 @@ def get_direct_laylo_seated_signups():
 
                 if not link or link in seen_urls:
                     continue
-                if "laylo.com" not in link and "seated.com" not in link:
-                    continue
                 if link in ("https://laylo.com", "https://signup.seated.com", "https://www.laylo.com", "https://www.seated.com"):
+                    continue
+
+                combined_text = f"{link} {title} {snippet}".lower()
+                if "laylo" not in combined_text and "seated" not in combined_text:
                     continue
 
                 seen_urls.add(link)
@@ -154,103 +155,4 @@ def get_ticketmaster_sales():
                     "artist": artist,
                     "city": city,
                     "when": when_str,
-                    "link": link,
-                    "is_presale": is_presale,
-                    "score": score
-                })
-        except Exception as e:
-            print(f"⚠️ TM {country} error: {e}")
-
-    print(f"✅ Ticketmaster collected: {len(results)}")
-    return results
-
-def filter_new_ids(items):
-    """Strictly filters out already-sent items via Supabase; falls back safely if DB errors."""
-    if not SUPABASE_URL or not SUPABASE_KEY:
-        return items[:10]
-
-    headers = {
-        "apikey": SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}",
-        "Content-Type": "application/json",
-        "Prefer": "resolution=ignore-duplicates"
-    }
-    new_items = []
-    for item in items:
-        ev_id = item["id"]
-        try:
-            check = requests.get(
-                f"{SUPABASE_URL}/rest/v1/seen_events?event_id=eq.{requests.utils.quote(ev_id)}&select=event_id",
-                headers=headers,
-                timeout=8
-            )
-            if check.status_code == 200 and len(check.json()) > 0:
-                continue
-
-            ins = requests.post(
-                f"{SUPABASE_URL}/rest/v1/seen_events",
-                headers=headers,
-                json={"event_id": ev_id, "artist": item["artist"][:150], "url": item["link"][:400]},
-                timeout=8
-            )
-            if ins.status_code in (200, 201, 204):
-                new_items.append(item)
-            else:
-                print(f"⚠️ Supabase insert status {ins.status_code}: {ins.text[:100]}")
-                new_items.append(item)
-        except Exception as e:
-            print(f"⚠️ Supabase error: {e}")
-            new_items.append(item)
-
-    return new_items
-
-def post_to_discord(title, items, color=3066993):
-    if not DISCORD_WEBHOOK_URL or not items:
-        return
-    lines = []
-    for i, it in enumerate(items[:10], 1):
-        lines.append(
-            f"**{i}. {it['artist']}** — `{it['city']}`\n"
-            f"   {it['when']}\n"
-            f"   🔗 [Open Signup / Ticket Link]({it['link']})"
-        )
-    payload = {
-        "embeds": [{
-            "title": title,
-            "description": "\n\n".join(lines),
-            "color": color,
-            "footer": {"text": f"24/7 Presale Radar • {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"}
-        }]
-    }
-    r = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=12)
-    print(f"📨 Discord '{title}' status: {r.status_code}")
-
-def run():
-    print("🚀 Running Zero-Repeat Laylo/Seated + Ticketmaster Radar...")
-
-    # 1. Laylo & Seated Direct RSVP Signups
-    signups = get_direct_laylo_seated_signups()
-    new_signups = filter_new_ids(signups)
-    print(f"🆕 Brand-new Laylo/Seated signups: {len(new_signups)}")
-    if new_signups:
-        post_to_discord("🎟️ NEW LAYLO & SEATED PRESALE SIGNUPS!", new_signups[:10], color=10181046)
-
-    # 2. Ticketmaster Upcoming Presales & Sales
-    tm_sales = get_ticketmaster_sales()
-    unique_tm = {}
-    for it in tm_sales:
-        key = it["id"]
-        if key not in unique_tm or it["score"] > unique_tm[key]["score"]:
-            unique_tm[key] = it
-
-    ranked_tm = sorted(unique_tm.values(), key=lambda x: x["score"], reverse=True)
-    new_tm = filter_new_ids(ranked_tm)
-    print(f"🆕 Brand-new Ticketmaster presales/sales: {len(new_tm)}")
-    if new_tm:
-        post_to_discord("🆕 NEW TICKETMASTER PRESALES & ONSALES!", new_tm[:10], color=3066993)
-
-    if not new_signups and not new_tm:
-        print("😴 No brand-new events this hour — staying quiet to prevent repeats!")
-
-if __name__ == "__main__":
-    run()
+                    "
