@@ -29,7 +29,6 @@ def parse_iso(dt_str):
         return None
 
 def get_direct_laylo_seated_signups():
-    """Fetches direct laylo.com and signup.seated.com RSVP pages using free-tier-compatible Serper queries."""
     if not SERPER_API_KEY:
         print("❌ SERPER_API_KEY is missing!")
         return []
@@ -124,35 +123,4 @@ def get_ticketmaster_sales():
                 for p in presales:
                     ps = parse_iso(p.get("startDateTime"))
                     pe = parse_iso(p.get("endDateTime"))
-                    if (ps and ps > now_utc) or (ps and pe and ps <= now_utc <= pe):
-                        active_presales.append((ps or now_utc, p.get("name", "Presale"), p.get("url") or ev.get("url")))
-
-                if not active_presales and not (pub_start and pub_start > now_utc):
-                    continue
-
-                seen.add(ev_id)
-                attractions = ev.get("_embedded", {}).get("attractions", [])
-                artist = attractions[0].get("name") if attractions else ev.get("name", "Unknown")
-
-                venues = ev.get("_embedded", {}).get("venues", [])
-                v = venues[0] if venues else {}
-                city = f"{v.get('city', {}).get('name', '')}, {country}".strip(", ")
-
-                active_presales.sort(key=lambda x: x[0])
-                if active_presales:
-                    p_dt, p_name, p_url = active_presales[0]
-                    when_str = f"🎟️ Presale ({p_name}): {p_dt.strftime('%b %d, %H:%M UTC')}"
-                    link = p_url or ev.get("url", "")
-                    is_presale = True
-                else:
-                    when_str = f"🔥 Public Sale: {pub_start.strftime('%b %d, %H:%M UTC')}"
-                    link = ev.get("url", "")
-                    is_presale = False
-
-                score = 70 + (25 if is_presale else 0) + (30 if any(a in artist.lower() for a in PREFERRED_ARTISTS) else 0)
-                results.append({
-                    "id": f"tm_{artist.lower()}_{city.lower()}",
-                    "artist": artist,
-                    "city": city,
-                    "when": when_str,
-                    "
+                    if (ps and ps >
